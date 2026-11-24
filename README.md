@@ -13,6 +13,10 @@ make dev P=~/work/api.feat-x   # …or any repo / worktree
 make install    # build, install the app and the `wart` CLI
 ```
 
+Node.js and npm are optional on the host: when absent, npm runs automatically in
+the official Node 22 Docker image. Docker must be running; Rust stays on the host
+because Tauri builds a native app for the current platform.
+
 Then, from any project root, worktree, or folder of repos:
 
 ```sh

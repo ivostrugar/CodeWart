@@ -20,8 +20,8 @@ export PATH := $(if $(NODE_DIR),$(NODE_DIR):,)$(HOME)/.cargo/bin:$(PATH)
 # Resolve tools explicitly (make 3.81 on macOS ignores the exported PATH for direct execs).
 CARGO_BIN := $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 RUSTUP   := $(shell command -v rustup 2>/dev/null || echo $(HOME)/.cargo/bin/rustup)
-NPM      ?= $(if $(NODE_DIR),$(NODE_DIR)/npm,npm)
-TAURI    := $(NPM) exec -- tauri
+NPM      ?= $(if $(NODE_DIR),$(NODE_DIR)/npm,scripts/npm-docker)
+TAURI    := $(if $(NODE_DIR),$(NPM) exec -- tauri,$(CARGO_BIN) tauri)
 CARGO    := cd src-tauri && $(CARGO_BIN)
 UNAME_S  := $(shell uname -s)
 BIN_DIR  ?= $(HOME)/.local/bin
@@ -45,13 +45,16 @@ setup: doctor deps ## Check toolchains and install all dependencies
 deps: ## Install npm dependencies and fetch crates
 	$(NPM) install
 	$(CARGO) fetch
+ifeq ($(NODE_DIR),)
+	@$(CARGO_BIN) tauri --version >/dev/null 2>&1 || $(CARGO_BIN) install tauri-cli --version 2.12.4 --locked
+endif
 
 .PHONY: doctor
 doctor: ## Verify required toolchains are installed
 	@command -v cargo >/dev/null || { echo "✗ Rust missing: curl https://sh.rustup.rs -sSf | sh"; exit 1; }
-	@command -v node  >/dev/null || { echo "✗ Node.js missing (>= 20)"; exit 1; }
+	@$(if $(NODE_DIR),command -v node,docker info) >/dev/null 2>&1 || { echo "✗ Node.js >= 20 or running Docker required"; exit 1; }
 	@command -v git   >/dev/null || { echo "✗ git missing"; exit 1; }
-	@echo "✓ cargo $$(cargo --version | cut -d' ' -f2)  ✓ node $$(node --version)  ✓ git $$(git --version | cut -d' ' -f3)"
+	@echo "✓ cargo $$(cargo --version | cut -d' ' -f2)  ✓ $(if $(NODE_DIR),node $$(node --version),npm via Docker)  ✓ git $$(git --version | cut -d' ' -f3)"
 
 ##@ Develop
 
@@ -112,7 +115,7 @@ build-debug: ## Build an unoptimised app bundle (faster)
 	$(TAURI) build --debug
 
 .PHONY: build-app
-build-app: ## Build just the app bundle (.app / AppImage / msi), no DMG
+build-app: deps ## Build just the app bundle (.app / AppImage / msi), no DMG
 ifeq ($(UNAME_S),Darwin)
 	$(TAURI) build --bundles app
 else ifeq ($(UNAME_S),Linux)

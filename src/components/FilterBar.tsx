@@ -1,6 +1,6 @@
 import type { Editor, Filters } from "../types";
 import { fileManagerName } from "../util";
-import { Back, Check, Code, Cycle, Folder, Terminal } from "./Icons";
+import { Back, Check, Code, Folder, Forward, Terminal } from "./Icons";
 
 interface Props {
   filters: Filters;
@@ -12,6 +12,8 @@ interface Props {
   onReveal: () => void;
   canBack: boolean;
   onBack: () => void;
+  /** Repo that Back returns to (this one, or the tab you came from). */
+  backName?: string;
   related: { id: string; name: string; worktree?: string; branch: string | null; sameBranch: boolean; isNext: boolean }[];
   groupName?: string;
   /** Name of the repo this workspace shows (label of the rotate pill). */
@@ -30,53 +32,50 @@ function Pill({ on, label, onClick, tip }: { on: boolean; label: string; onClick
   );
 }
 
-export function FilterBar({ filters, onFilters, hiddenCount, editor, onEditor, onTerminal, onReveal, canBack, onBack, related, groupName, currentName, onJumpToPeer, hasForeign }: Props) {
+export function FilterBar({ filters, onFilters, hiddenCount, editor, onEditor, onTerminal, onReveal, canBack, onBack, backName, related, groupName, currentName, onJumpToPeer, hasForeign }: Props) {
   const toggle = (k: keyof Filters) => onFilters({ ...filters, [k]: !filters[k] });
   return (
     <div className="filterbar">
-      <button className="backbtn" onClick={onBack} disabled={!canBack} aria-label="Back" data-tip="Back (⌥←)" data-tip-left>
-        <Back size={14} /> Back
+      <button
+        className="backbtn"
+        onClick={onBack}
+        disabled={!canBack}
+        aria-label={backName ? `Back to ${backName}` : "Back"}
+        data-tip="Back (⌥←)"
+        data-tip-left
+      >
+        <Back size={14} />
+        <span className="two">
+          Back
+          {canBack && backName && <small>{backName}</small>}
+        </span>
       </button>
-      {related.length > 0 && (
-        <nav className="related" aria-label={`Related repositories${groupName ? ` in ${groupName}` : ""}`}>
-          {/* Rotate pill: shows the repo you're on; hovering swipes to the one it
-              switches to (what ` does). */}
-          {(() => {
-            const next = related.find((r) => r.isNext) ?? related[0];
-            return (
+      {related.length > 0 &&
+        (() => {
+          const next = related.find((r) => r.isNext) ?? related[0];
+          return (
+            <nav className="related" aria-label={`Related repositories${groupName ? ` in ${groupName}` : ""}`}>
+              <span className="rel cur" aria-current="true" title={`You're in ${currentName}${groupName ? ` · ${groupName}` : ""}`}>
+                {currentName}
+              </span>
               <button
-                className={`rel cycle${next.sameBranch ? " same" : ""}`}
+                className={`rel nextbtn${next.sameBranch ? " same" : ""}`}
                 onClick={() => onJumpToPeer(next.id, next.worktree)}
-                aria-label={`Current repository ${currentName}; switch to ${next.name}`}
-                title={`Next repo (\`): ${next.name}${next.sameBranch ? ` on the same branch (${next.branch})` : next.branch ? ` (${next.branch}, no worktree on this branch)` : ""}`}
+                aria-label={`Next repository: ${next.name}`}
+                title={`Next repo (\`): ${next.name}${next.sameBranch ? ` on the same branch (${next.branch})` : next.branch ? ` (${next.branch}, no worktree on this branch)` : ""}${related.length > 1 ? ` · ${related.length + 1} repos in this group` : ""}`}
               >
-                <Cycle size={14} />
-                <span className="swap">
-                  <span className="cur">{currentName}</span>
-                  <span className="nxt">
+                <span className="two">
+                  Next
+                  <small>
                     {next.name}
-                    {!next.sameBranch && next.branch && <span className="br">{next.branch}</span>}
-                  </span>
+                    {!next.sameBranch && next.branch ? ` · ${next.branch}` : ""}
+                  </small>
                 </span>
+                <Forward size={14} />
               </button>
-            );
-          })()}
-          {/* Bigger groups: the other repos as direct jumps. */}
-          {related
-            .filter((r) => !r.isNext)
-            .map((r) => (
-              <button
-                key={r.id}
-                className={`rel${r.sameBranch ? " same" : ""}`}
-                onClick={() => onJumpToPeer(r.id, r.worktree)}
-                title={r.sameBranch ? `${r.name} on the same branch (${r.branch})` : `${r.name}${r.branch ? ` (${r.branch})` : ""}: no worktree on this branch`}
-              >
-                {r.name}
-                {!r.sameBranch && r.branch && <span className="br">{r.branch}</span>}
-              </button>
-            ))}
-        </nav>
-      )}
+            </nav>
+          );
+        })()}
       <span className="grow" />
       {hiddenCount > 0 && (
         <span className="m" style={{ marginRight: 6 }}>

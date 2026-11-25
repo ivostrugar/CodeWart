@@ -199,6 +199,24 @@ export interface ReviewComment {
   body: string;
   /** Set when made from the call graph. */
   symbol?: string;
+  /** Its number in the review it was sent in (what the agent's answers refer to). */
+  num?: number;
+}
+
+/** The agent's answer to one comment (`wart answer`). */
+export interface CommentAnswer {
+  status: "solved" | "answered";
+  text: string;
+  /** When it arrived (ms since epoch). */
+  at: number;
+}
+
+/** A comment from an earlier review round, shown faintly in the diff. */
+export interface Ghost {
+  comment: ReviewComment;
+  /** Review round (#n) it was sent in. */
+  round: number;
+  answer?: CommentAnswer;
 }
 
 export interface Filters {
@@ -252,6 +270,18 @@ export interface ReviewSession {
   comments: ReviewComment[];
   note: string;
   markdown: string;
+  /** Review id the agent answers with (`wart answer <id>`). */
+  id?: string;
+  /** The agent's answers, by comment id. */
+  answers?: Record<string, CommentAnswer>;
+  /** Anything the agent wrote that wasn't an answer to a numbered comment. */
+  reply?: string;
+}
+
+/** `wart answer <id>`: the agent's answers to a review's comments. */
+export interface ReviewAnswer {
+  review: string;
+  text: string;
 }
 
 /** `wart review` from an agent: a worktree waiting for a review. */

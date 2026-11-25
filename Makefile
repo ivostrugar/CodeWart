@@ -22,6 +22,8 @@ CARGO_BIN := $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/car
 RUSTUP   := $(shell command -v rustup 2>/dev/null || echo $(HOME)/.cargo/bin/rustup)
 NPM      ?= $(if $(NODE_DIR),$(NODE_DIR)/npm,npm)
 TAURI    := $(NPM) exec -- tauri
+# Update bundles must be signed (CI has the key); without TAURI_SIGNING_PRIVATE_KEY, skip them.
+TAURI_BUILD := $(TAURI) build $(if $(TAURI_SIGNING_PRIVATE_KEY),,--config src-tauri/tauri.unsigned.conf.json)
 CARGO    := cd src-tauri && $(CARGO_BIN)
 UNAME_S  := $(shell uname -s)
 BIN_DIR  ?= $(HOME)/.local/bin
@@ -105,32 +107,32 @@ build-web: ## Build the UI bundle into dist/
 
 .PHONY: build
 build: ## Build release app + installers for this platform
-	$(TAURI) build
+	$(TAURI_BUILD)
 
 .PHONY: build-debug
 build-debug: ## Build an unoptimised app bundle (faster)
-	$(TAURI) build --debug
+	$(TAURI_BUILD) --debug
 
 .PHONY: build-app
 build-app: ## Build just the app bundle (.app / AppImage / msi), no DMG
 ifeq ($(UNAME_S),Darwin)
-	$(TAURI) build --bundles app
+	$(TAURI_BUILD) --bundles app
 else ifeq ($(UNAME_S),Linux)
-	$(TAURI) build --bundles appimage
+	$(TAURI_BUILD) --bundles appimage
 else
-	$(TAURI) build --bundles msi
+	$(TAURI_BUILD) --bundles msi
 endif
 
 .PHONY: build-universal
 build-universal: ## macOS universal binary (Apple Silicon + Intel)
 	$(RUSTUP) target add aarch64-apple-darwin x86_64-apple-darwin
-	$(TAURI) build --target universal-apple-darwin
+	$(TAURI_BUILD) --target universal-apple-darwin
 
 .PHONY: dist
 dist: ## Build installers for this OS and collect them in ./release
 ifeq ($(UNAME_S),Darwin)
 	$(RUSTUP) target add aarch64-apple-darwin x86_64-apple-darwin
-	$(TAURI) build --target universal-apple-darwin --bundles app
+	$(TAURI_BUILD) --target universal-apple-darwin --bundles app
 	rm -rf release
 	mkdir -p release/dmg-root
 	cp -R src-tauri/target/universal-apple-darwin/release/bundle/macos/CodeWart.app release/dmg-root/
@@ -140,7 +142,7 @@ ifeq ($(UNAME_S),Darwin)
 	rm -rf release/dmg-root
 	cd src-tauri/target/universal-apple-darwin/release/bundle/macos && zip -qry $(CURDIR)/release/CodeWart_macos_universal.app.zip CodeWart.app
 else
-	$(TAURI) build
+	$(TAURI_BUILD)
 	rm -rf release
 	mkdir -p release
 	-cp $(BUNDLE)/deb/*.deb $(BUNDLE)/appimage/*.AppImage $(BUNDLE)/rpm/*.rpm release/ 2>/dev/null

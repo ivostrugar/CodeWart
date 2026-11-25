@@ -57,6 +57,9 @@ export const Check = (p: P) => (
 export const Code = (p: P) => (
   <svg {...base(p)}><path d="M5.5 4.5L2 8l3.5 3.5M10.5 4.5L14 8l-3.5 3.5M9 3l-2 10" /></svg>
 );
+export const Download = (p: P) => (
+  <svg {...base(p)}><path d="M8 2.5v8M4.5 7.5L8 11l3.5-3.5M3 13.5h10" /></svg>
+);
 export const Terminal = (p: P) => (
   <svg {...base(p)}><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" /><path d="M4.5 6.5L6.5 8l-2 1.5M8.5 10h3" /></svg>
 );
@@ -87,8 +90,8 @@ export const DiffIcon = (p: P) => (
 export const GraphIcon = (p: P) => (
   <svg {...base(p)}><rect x="1.5" y="6" width="4" height="4" rx="1" /><rect x="10.5" y="2" width="4" height="4" rx="1" /><rect x="10.5" y="10" width="4" height="4" rx="1" /><path d="M5.5 8h2.5V4h2.5M8 8v4h2.5" /></svg>
 );
-export const Cycle = (p: P) => (
-  <svg {...base(p)}><path d="M13.5 6.5A5.5 5.5 0 003.4 4.6M2.5 9.5a5.5 5.5 0 0010.1 1.9M3.2 1.8v3h3M12.8 14.2v-3h-3" /></svg>
+export const Forward = (p: P) => (
+  <svg {...base(p)}><path d="M3 8h10M9 4l4 4-4 4" /></svg>
 );
 export const Copy = (p: P) => (
   <svg {...base(p)}><rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.5" /><path d="M10.75 5.25V3.5a1.25 1.25 0 00-1.25-1.25h-6A1.25 1.25 0 002.25 3.5v6a1.25 1.25 0 001.25 1.25h1.75" /></svg>

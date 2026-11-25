@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { gapSize, gapsOf, rowsWithContext, unfoldGap, type Unfold } from "../expand";
-import type { CommitBadge, FileDiff, ReviewComment } from "../types";
+import type { CommitBadge, FileDiff, Ghost, ReviewComment } from "../types";
 import { TAG_LABEL, isFileComment, splitPath } from "../util";
-import { CodeLines, FileComments, type Row } from "./CodeLines";
+import { CodeLines, FileComments, GhostCards, GhostMark, type Row } from "./CodeLines";
 import { ChevronDown, ChevronRight, Code, Comment } from "./Icons";
 
 export interface ScrollTarget {
@@ -15,6 +15,8 @@ export interface ScrollTarget {
 interface Props {
   files: FileDiff[];
   comments: ReviewComment[];
+  /** Comments from earlier review rounds, with the agent's answers. */
+  ghosts?: Ghost[];
   onAddComment: (c: ReviewComment) => void;
   onRemoveComment: (id: string) => void;
   onUpdateComment: (id: string, body: string) => void;
@@ -32,8 +34,9 @@ interface Props {
 }
 
 const NO_COMMENTS: ReviewComment[] = [];
+const NO_GHOSTS: Ghost[] = [];
 
-export function DiffView({ files, comments, onAddComment, onRemoveComment, onUpdateComment, target, onActiveFile, onOpenInEditor, sendLabel, scrollRef, loadFile, commits, onCommit }: Props) {
+export function DiffView({ files, comments, ghosts, onAddComment, onRemoveComment, onUpdateComment, target, onActiveFile, onOpenInEditor, sendLabel, scrollRef, loadFile, commits, onCommit }: Props) {
   const scroller = useRef<HTMLDivElement | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [flash, setFlash] = useState<string | null>(null);
@@ -99,6 +102,11 @@ export function DiffView({ files, comments, onAddComment, onRemoveComment, onUpd
     }
     return m;
   }, [comments]);
+  const ghostsByFile = useMemo(() => {
+    const m = new Map<string, Ghost[]>();
+    for (const g of ghosts ?? []) m.set(g.comment.file, [...(m.get(g.comment.file) ?? []), g]);
+    return m;
+  }, [ghosts]);
 
   if (files.length === 0) {
     return (
@@ -130,6 +138,7 @@ export function DiffView({ files, comments, onAddComment, onRemoveComment, onUpd
             })
           }
           comments={byFile.get(f.path) ?? NO_COMMENTS}
+          ghosts={ghostsByFile.get(f.path) ?? NO_GHOSTS}
           flash={flash?.startsWith(f.path + "|") ? flash.slice(f.path.length + 1) : null}
           onAddComment={onAddComment}
           onRemoveComment={onRemoveComment}
@@ -150,6 +159,7 @@ interface BlockProps {
   collapsed: boolean;
   onToggle: () => void;
   comments: ReviewComment[];
+  ghosts: Ghost[];
   flash: string | null;
   onAddComment: (c: ReviewComment) => void;
   onRemoveComment: (id: string) => void;
@@ -166,6 +176,7 @@ const FileBlock = memo(function FileBlock({
   collapsed,
   onToggle,
   comments,
+  ghosts,
   flash,
   onAddComment,
   onRemoveComment,
@@ -209,6 +220,8 @@ const FileBlock = memo(function FileBlock({
     () => [comments.filter(isFileComment), comments.filter((c) => !isFileComment(c))],
     [comments],
   );
+  const [fileGhosts, lineGhosts] = useMemo(() => [ghosts.filter((g) => g.comment.line === 0), ghosts.filter((g) => g.comment.line !== 0)], [ghosts]);
+  const [fileGhostsOpen, setFileGhostsOpen] = useState(false);
 
   return (
     <section className="dfile" data-file={file.path}>
@@ -231,6 +244,7 @@ const FileBlock = memo(function FileBlock({
         >
           <Comment size={14} />
         </button>
+        {fileGhosts.length > 0 && <GhostMark ghosts={fileGhosts} open={fileGhostsOpen} onToggle={() => setFileGhostsOpen((o) => !o)} />}
         <span className="m" style={{ flex: "none" }}>
           {file.additions > 0 && <span className="add-c">+{file.additions}</span>} {file.deletions > 0 && <span className="del-c">−{file.deletions}</span>}
         </span>
@@ -253,6 +267,11 @@ const FileBlock = memo(function FileBlock({
           </button>
         )}
       </div>
+      {fileGhostsOpen && fileGhosts.length > 0 && (
+        <div className="filecomments">
+          <GhostCards ghosts={fileGhosts} onClose={() => setFileGhostsOpen(false)} />
+        </div>
+      )}
       <FileComments
         path={file.path}
         side={file.status === "deleted" ? "old" : "new"}
@@ -278,6 +297,7 @@ const FileBlock = memo(function FileBlock({
               path={file.path}
               rows={rows}
               comments={lineComments}
+              ghosts={lineGhosts}
               onAddComment={onAddComment}
               onRemoveComment={onRemoveComment}
               onUpdateComment={onUpdateComment}

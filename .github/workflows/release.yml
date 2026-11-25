@@ -13,6 +13,13 @@
 # add these repository secrets and the build is signed and notarized:
 #   APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
 #   APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID
+#
+# Auto-update: the app installs a new release only if it is signed with the key
+# whose public half is in tauri.conf.json (plugins.updater.pubkey). Add the
+# private key as TAURI_SIGNING_PRIVATE_KEY and its password as
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD. tauri-action then attaches the signed
+# update bundles and latest.json, which the app checks. Without the key the
+# release is built without them, and installed apps won't see it as an update.
 name: Release
 
 on:
@@ -87,9 +94,24 @@ jobs:
             { echo "$v<<$d"; echo "${!v}"; echo "$d"; } >> "$GITHUB_ENV"
           done
 
+      - name: Update signing key (if configured)
+        id: updater
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "args=" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set: building without auto-update bundles."
+            echo "args=--config src-tauri/tauri.unsigned.conf.json" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: CodeWart ${{ github.ref_name }}
@@ -97,7 +119,7 @@ jobs:
             Install the app, open it once and click **Install `wart`** in the top bar
             (or run `make install-cli` from a checkout). Then run `wart .` in any repo.
           releaseDraft: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.updater.outputs.args }}
 
       - name: Keep installers as workflow artifacts (manual runs)
         if: github.ref_type != 'tag'

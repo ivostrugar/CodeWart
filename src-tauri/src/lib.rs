@@ -25,7 +25,12 @@ struct LaunchPaths(Mutex<Vec<String>>);
 #[derive(Default)]
 struct LaunchReview(Mutex<Option<review::ReviewRequest>>);
 
-/// Turn CLI arguments into absolute project paths. No argument = cwd.
+/// `wart answer` results that arrived before the UI was ready.
+#[derive(Default)]
+struct LaunchAnswers(Mutex<Vec<review::ReviewAnswer>>);
+
+/// Turn CLI arguments into absolute project paths. No argument = cwd
+/// (except for `wart answer`, which opens nothing).
 fn paths_from_args(args: &[String], cwd: &Path) -> Vec<String> {
     let mut paths: Vec<String> = args
         .iter()
@@ -39,7 +44,11 @@ fn paths_from_args(args: &[String], cwd: &Path) -> Vec<String> {
         .collect();
     let launched_from_shell =
         std::env::var_os("TERM").is_some() || std::env::var_os("CODEWART_CWD").is_some();
-    if paths.is_empty() && launched_from_shell && cwd != Path::new("/") {
+    if paths.is_empty()
+        && launched_from_shell
+        && cwd != Path::new("/")
+        && review::answer_arg(args).is_none()
+    {
         paths.push(git::path_str(&git::normalize(cwd)));
     }
     paths
@@ -68,6 +77,17 @@ fn launch_paths(state: tauri::State<LaunchPaths>) -> Vec<String> {
 #[tauri::command]
 fn launch_review(state: tauri::State<LaunchReview>) -> Option<review::ReviewRequest> {
     state.0.lock().unwrap().take()
+}
+
+#[tauri::command]
+fn launch_answers(state: tauri::State<LaunchAnswers>) -> Vec<review::ReviewAnswer> {
+    std::mem::take(&mut *state.0.lock().unwrap())
+}
+
+/// Rewrite the `wart` launcher / Claude skill if an earlier version installed them.
+#[tauri::command]
+async fn refresh_installs() -> Result<Vec<String>, String> {
+    blocking(|| Ok(cli::refresh())).await
 }
 
 #[tauri::command]
@@ -226,7 +246,7 @@ pub fn run() {
         return;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("CodeWart {}\n\nUsage: wart [PATH...]   (or codewart [PATH...])\n\nOpens the git project, worktree, or folder of repositories at PATH\n(default: current directory).\nIf CodeWart is already running the project opens as a new tab.\n\n       wart review [-m MESSAGE] [--timeout SECS] [PATH]\n\nAsks for a review of the worktree at PATH in CodeWart and waits; prints the\nreview when you send it (exit 3 if --timeout passes first).\n\n       wart agent\n\nGuide for coding agents: what CodeWart is for and how to use it.\n\nEnvironment:\n  CODEWART_EDITOR    editor command (default: first of cursor, code, zed, subl …)\n  CODEWART_TERMINAL  terminal app/command for \"open in terminal\"", env!("CARGO_PKG_VERSION"));
+        println!("CodeWart {}\n\nUsage: wart [PATH...]   (or codewart [PATH...])\n\nOpens the git project, worktree, or folder of repositories at PATH\n(default: current directory).\nIf CodeWart is already running the project opens as a new tab.\n\n       wart review [-m MESSAGE] [--timeout SECS] [PATH]\n\nAsks for a review of the worktree at PATH in CodeWart and waits; prints the\nreview when you send it (exit 3 if --timeout passes first).\n\n       wart answer REVIEW_ID < answers\n\nSends the agent's answers to a review's numbered comments back to CodeWart\n(one per comment: `1. solved: …` or `2. answered: …`).\n\n       wart agent\n\nGuide for coding agents: what CodeWart is for and how to use it.\n\nEnvironment:\n  CODEWART_EDITOR    editor command (default: first of cursor, code, zed, subl …)\n  CODEWART_TERMINAL  terminal app/command for \"open in terminal\"", env!("CARGO_PKG_VERSION"));
         return;
     }
     if std::env::var_os("TERM").is_none() {
@@ -234,6 +254,11 @@ pub fn run() {
     }
     let initial = paths_from_args(&args, &launch_cwd());
     let initial_review = review::from_args(&args, &initial);
+    // Consume it right away: the waiting launcher watches for the file to go.
+    let initial_answers: Vec<_> = review::answer_arg(&args)
+        .and_then(|f| review::take_answer(f).ok())
+        .into_iter()
+        .collect();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
@@ -242,6 +267,12 @@ pub fn run() {
             } else {
                 PathBuf::from(cwd)
             };
+            if let Some(f) = review::answer_arg(&argv) {
+                if let Ok(a) = review::take_answer(f) {
+                    let _ = app.emit("review-answer", a);
+                }
+                return;
+            }
             let paths = paths_from_args(&argv, &cwd);
             // A review request opens its worktree itself and doesn't steal focus.
             if let Some(req) = review::from_args(&argv, &paths) {
@@ -259,11 +290,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(LaunchPaths(Mutex::new(initial)))
         .manage(LaunchReview(Mutex::new(initial_review)))
+        .manage(LaunchAnswers(Mutex::new(initial_answers)))
         .invoke_handler(tauri::generate_handler![
             launch_paths,
             launch_review,
+            launch_answers,
+            refresh_installs,
             review_waiting,
             attribution,
             write_review_reply,

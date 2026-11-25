@@ -9,6 +9,7 @@ import type {
   FileDiff,
   FileTag,
   Filters,
+  Ghost,
   GraphNode,
   GraphScope,
   History,
@@ -57,12 +58,20 @@ interface Props {
   tabId: string;
   /** An agent is waiting for a review of this worktree (`wart review`). */
   reviewRequest?: PendingReview;
-  onReviewDone: (tabId: string) => void;
+  /** The request with this reply file was answered. */
+  onReviewDone: (reply: string) => void;
+  /** Tabs with the same scope share one review (repos on one branch / one folder request). */
+  reviewScope: string;
+  /** Previous tab, for Back when this tab has no history of its own. */
+  backTo?: { id: string; name: string } | null;
+  onBackTo: (tabId: string) => void;
   onJumpToPeer: (projectId: string, worktree?: string) => void;
   toast: (msg: string, err?: boolean) => void;
 }
 
 const POLL_MS = 1500;
+/** How many past review rounds leave ghost comments in the diff. */
+const GHOST_ROUNDS = 5;
 const MAX_BACK = 50;
 
 /** What "back" restores. */
@@ -119,6 +128,9 @@ export const Workspace = memo(function Workspace({
   tabId,
   reviewRequest,
   onReviewDone,
+  reviewScope,
+  backTo,
+  onBackTo,
   onJumpToPeer,
   toast,
 }: Props) {
@@ -177,6 +189,11 @@ export const Workspace = memo(function Workspace({
     setFollow(prev.follow);
     setGraphSel(prev.graphSel);
     pendingScroll.current = prev.diffScroll;
+  };
+  /** Back in this tab's history; with none left, back to the tab you came from. */
+  const back = () => {
+    if (navStack.current.length) goBack();
+    else if (backTo) onBackTo(backTo.id);
   };
   // Restore the diff scroll position once the restored view has rendered.
   useEffect(() => {
@@ -493,6 +510,14 @@ export const Workspace = memo(function Workspace({
     },
     [archive],
   );
+  // Comments of the last rounds stay in the diff as ghosts, with the agent's answers.
+  const ghosts = useMemo<Ghost[]>(
+    () =>
+      archive.list
+        .slice(0, GHOST_ROUNDS)
+        .flatMap((s) => s.comments.map((c) => ({ comment: c, round: s.n, answer: s.answers?.[c.id] }))),
+    [archive.list],
+  );
   const removeComment = useCallback((id: string) => setComments((cs) => cs.filter((c) => c.id !== id)), []);
   const updateComment = useCallback(
     (id: string, body: string) => setComments((cs) => cs.map((c) => (c.id === id ? { ...c, body } : c))),
@@ -568,7 +593,7 @@ export const Workspace = memo(function Workspace({
       if (t.closest("input, textarea, select, [contenteditable]")) return;
       if (e.altKey && e.key === "ArrowLeft") {
         e.preventDefault();
-        goBack();
+        back();
         return;
       }
       // ⌥F / ⌘F: find in the diff, starting from the selected text.
@@ -606,7 +631,7 @@ export const Workspace = memo(function Workspace({
     const onMouse = (e: MouseEvent) => {
       if (e.button === 3) {
         e.preventDefault();
-        goBack();
+        back();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -636,8 +661,9 @@ export const Workspace = memo(function Workspace({
         onEditor={() => openInEditor()}
         onTerminal={() => run(api.openInTerminal(worktree))}
         onReveal={() => run(api.revealInFileManager(worktree))}
-        canBack={navDepth > 0}
-        onBack={goBack}
+        canBack={navDepth > 0 || !!backTo}
+        onBack={back}
+        backName={navDepth > 0 ? project.name : backTo?.name}
         related={related}
         groupName={groupName}
         currentName={project.name}
@@ -698,6 +724,7 @@ export const Workspace = memo(function Workspace({
                   <DiffView
                     files={visible}
                     comments={comments}
+                    ghosts={ghosts}
                     onAddComment={addComment}
                     onRemoveComment={removeComment}
                     onUpdateComment={updateComment}
@@ -748,10 +775,13 @@ export const Workspace = memo(function Workspace({
             worktree={worktree}
             repoName={project.name}
             tabId={tabId}
+            scope={reviewScope}
+            scopeName={reviewRequest?.group?.name ?? groupName ?? branch}
             target={targetLabel}
             comments={comments}
             onRemove={removeComment}
             onJump={(c) => jumpTo(c.file, c.line || undefined, c.side)}
+            onFocusTab={() => onJumpToPeer(project.id, worktree)}
             onClear={() => {
               setComments([]);
               setNote("");
@@ -763,7 +793,7 @@ export const Workspace = memo(function Workspace({
             sessions={archive.list}
             onArchive={archiveReview}
             request={reviewRequest}
-            onRequestDone={() => onReviewDone(tabId)}
+            onRequestDone={onReviewDone}
           />
         </div>
       </div>

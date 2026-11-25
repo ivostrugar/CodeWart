@@ -42,6 +42,48 @@ pub fn from_args(args: &[String], paths: &[String]) -> Option<ReviewRequest> {
     })
 }
 
+/// `wart answer ID`: the agent's answers to the comments of review `ID`.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewAnswer {
+    /// Review id from the review's last line.
+    pub review: String,
+    /// The answers as the agent wrote them (`1. solved: …` lines).
+    pub text: String,
+}
+
+/// The `--review-answer=FILE` argument, if any.
+pub fn answer_arg(args: &[String]) -> Option<&str> {
+    args.iter().find_map(|a| a.strip_prefix("--review-answer="))
+}
+
+/// Read and delete an answers file the launcher wrote:
+/// `…/codewart-reviews/answer-<review id>-<n>.md`. Deleting it tells the
+/// launcher the answers arrived.
+pub fn take_answer(file: &str) -> Result<ReviewAnswer, String> {
+    let p = PathBuf::from(file);
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let dir = p
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str());
+    let review = name
+        .strip_prefix("answer-")
+        .and_then(|r| r.strip_suffix(".md"))
+        .and_then(|r| r.rsplit_once('-'))
+        .map(|(id, _)| id)
+        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()));
+    let (true, Some(DIR_NAME), Some(review)) = (p.is_absolute(), dir, review) else {
+        return Err(format!("not a review answers file: {file}"));
+    };
+    let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&p);
+    Ok(ReviewAnswer {
+        review: review.to_string(),
+        text,
+    })
+}
+
 /// Only files the launcher creates may be written: `…/codewart-reviews/review-*.md`.
 fn checked(reply: &str) -> Result<PathBuf, String> {
     let p = PathBuf::from(reply);
@@ -162,6 +204,31 @@ mod tests {
         assert!(checked(&p("other/review-1.md")).is_err());
         assert!(checked("codewart-reviews/review-1.md").is_err(), "relative");
         assert!(checked(&p("codewart-reviews/review-1.md")).is_ok());
+    }
+
+    #[test]
+    fn takes_answer_files_only() {
+        let d = dir();
+        let f = d.join("answer-r7k2m9-123.md");
+        std::fs::write(&f, "1. solved: done\n").unwrap();
+        let a = take_answer(f.to_str().unwrap()).unwrap();
+        assert_eq!(a.review, "r7k2m9");
+        assert_eq!(a.text, "1. solved: done\n");
+        assert!(!f.exists(), "consumed");
+        for bad in ["answer--1.md", "answer-a.b-1.md", "notes.md", "review-1.md"] {
+            let f = d.join(bad);
+            std::fs::write(&f, "x").unwrap();
+            assert!(take_answer(f.to_str().unwrap()).is_err(), "{bad}");
+            let _ = std::fs::remove_file(&f);
+        }
+        assert!(
+            take_answer("codewart-reviews/answer-a-1.md").is_err(),
+            "relative"
+        );
+        let args: Vec<String> = ["wart", "--review-answer=/t/x.md"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(answer_arg(&args), Some("/t/x.md"));
     }
 
     #[test]

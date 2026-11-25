@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api, errorMessage } from "../api";
 import { formatWhen } from "../reviewArchive";
+import { registerCopied } from "../reviewAnswers";
+import { hasContent, publish, unpublish, useScopePeers, type BoardEntry } from "../reviewBoard";
 import type { AgentSession, PendingReview, ReviewComment, ReviewSession } from "../types";
-import { relativeTime, reviewMarkdown } from "../util";
+import { answerFooter, newReviewId, numbered, relativeTime, reviewMarkdown } from "../util";
 import { ChevronDown, Copy, Send } from "./Icons";
-import { Popover } from "./Popover";
-import { contribute, others } from "../reviewShare";
+import { Popover, useAnchored } from "./Popover";
 
 interface Props {
   worktree: string;
@@ -14,10 +16,16 @@ interface Props {
   repoName: string;
   /** Stable id of this tab. */
   tabId: string;
+  /** Tabs sharing a scope are reviewed and sent together (same branch, or one folder request). */
+  scope: string;
+  /** What the scope is called in a shared review's heading (branch or folder). */
+  scopeName: string;
   target: string;
   comments: ReviewComment[];
   onRemove: (id: string) => void;
   onJump: (c: ReviewComment) => void;
+  /** Bring this tab to the front (a comment of it was clicked in another tab). */
+  onFocusTab: () => void;
   onClear: () => void;
   note: string;
   onNote: (s: string) => void;
@@ -27,10 +35,11 @@ interface Props {
   /** Past review sessions of this worktree, newest first. */
   sessions: ReviewSession[];
   /** Archive a handed-over review and clear what it contained. */
-  onArchive: (snap: ReviewSnapshot, via: "session" | "copy", sentTo?: string) => ReviewSession;
+  onArchive: BoardEntry["archive"];
   /** An agent ran `wart review` and is waiting for this review. */
   request?: PendingReview;
-  onRequestDone: () => void;
+  /** The request with this reply file was answered. */
+  onRequestDone: (reply: string) => void;
 }
 
 /** What the waiting agent receives when there is nothing to change. */
@@ -43,16 +52,48 @@ export interface ReviewSnapshot {
   comments: ReviewComment[];
   note: string;
   markdown: string;
+  id: string;
+}
+
+/** One repo's part of what is sent. */
+interface Part {
+  repo: string;
+  target: string;
+  comments: ReviewComment[];
+  note: string;
+  archive: BoardEntry["archive"];
+  /** This tab's own review. */
+  mine?: true;
+}
+
+/** Every repo's review in one prompt, comments numbered straight through, ending with how to answer. */
+function compose(parts: Part[], shared: boolean, scopeName: string, id: string, includeCode: boolean) {
+  let start = 1;
+  const sections = parts.map((p) => {
+    const md = reviewMarkdown({ ...p, includeCode, start });
+    const comments = numbered(p.comments, start);
+    start += p.comments.length;
+    return { part: p, md, comments };
+  });
+  const body = shared
+    ? `# Review of ${scopeName} (${sections.length} repositor${sections.length === 1 ? "y" : "ies"})\n\n` +
+      sections.map((s) => `## ${s.part.repo}\n\n${s.md.trimEnd()}`).join("\n\n")
+    : sections[0]?.md ?? "";
+  const markdown = sections.length ? `${body.trimEnd()}\n\n${answerFooter(id, start - 1)}` : "";
+  return { markdown, sections };
 }
 
 export function ReviewPane({
   worktree,
   repoName,
   tabId,
+  scope,
+  scopeName,
   target,
   comments,
   onRemove,
   onJump,
+  onFocusTab,
   onClear,
   note,
   onNote,
@@ -60,7 +101,7 @@ export function ReviewPane({
   diskVersion,
   sessions: past,
   onArchive,
-  request,
+  request: ownRequest,
   onRequestDone,
 }: Props) {
   const [includeCode, setIncludeCode] = useState(true);
@@ -69,26 +110,78 @@ export function ReviewPane({
   const [sessions, setSessions] = useState<AgentSession[] | null>(null);
   const [pickOpen, setPickOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** Id of the review being written; a new one after each hand-over. */
+  const [rid, setRid] = useState(newReviewId);
   // Hovering Copy / Send shows what will be sent. Small delays avoid flicker and
   // let the pointer travel into the preview to scroll it.
   const [previewOpen, setPreviewOpen] = useState(false);
   const peekTimer = useRef<number | undefined>(undefined);
+  const sendRow = useRef<HTMLDivElement>(null);
   const showPreview = (on: boolean) => {
     window.clearTimeout(peekTimer.current);
     peekTimer.current = window.setTimeout(() => setPreviewOpen(on), on ? 250 : 180);
   };
   useEffect(() => () => window.clearTimeout(peekTimer.current), []);
 
-  const markdown = useMemo(
-    () => reviewMarkdown({ comments, note, target, includeCode }),
-    [comments, note, target, includeCode],
+  // ---- this tab on the board, the other repos in the same scope ----------------
+  const live = useRef({ onRemove, onJump, onFocusTab, onArchive });
+  live.current = { onRemove, onJump, onFocusTab, onArchive };
+  useEffect(() => {
+    publish({
+      tabId,
+      scope,
+      repo: repoName,
+      target,
+      comments,
+      note,
+      request: ownRequest,
+      remove: (id) => live.current.onRemove(id),
+      focus: () => live.current.onFocusTab(),
+      jump: (c) => {
+        live.current.onFocusTab();
+        live.current.onJump(c);
+      },
+      archive: (snap, via, sentTo) => live.current.onArchive(snap, via, sentTo),
+    });
+  }, [tabId, scope, repoName, target, comments, note, ownRequest]);
+  useEffect(() => () => unpublish(tabId), [tabId]);
+  const peers = useScopePeers(scope, tabId);
+  const others = useMemo(() => peers.filter(hasContent), [peers]);
+  /** A request waiting anywhere in the scope is answered from any of its tabs. */
+  const request = ownRequest ?? peers.find((p) => p.request)?.request;
+  const shared = others.length > 0;
+
+  const mine: Part = { repo: repoName, target, comments, note, archive: onArchive, mine: true };
+  const parts: Part[] = [...(hasContent(mine) ? [mine] : []), ...others];
+  const { markdown, sections } = useMemo(
+    () => compose(parts, shared, scopeName, rid, includeCode),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [comments, note, target, others, shared, scopeName, rid, includeCode, repoName],
   );
-  const empty = comments.length === 0 && !note.trim();
-  const snapshot = (): ReviewSnapshot => ({ target, comments, note, markdown });
+  const empty = parts.length === 0;
+
+  /** Archive every repo's part of what was just handed over, as review `rid`. */
+  const archiveAll = (secs: typeof sections, md: string, via: "session" | "copy", sentTo?: string) => {
+    let mineRound: ReviewSession | null = null;
+    for (const s of secs) {
+      const r = s.part.archive({ target: s.part.target, comments: s.comments, note: s.part.note, markdown: md, id: rid }, via, sentTo);
+      if (s.part.mine) mineRound = r;
+    }
+    setRid(newReviewId());
+    return mineRound;
+  };
+  const alsoRepos = (secs: typeof sections) => {
+    const n = secs.filter((s) => !s.part.mine).length;
+    return n ? ` · with ${n} more repo${n === 1 ? "" : "s"}` : "";
+  };
 
   // A copied review waits for the agent's next version, then asks to be archived.
-  const [pending, setPending] = useState<{ snap: ReviewSnapshot; version: number } | null>(null);
+  const [pending, setPending] = useState<{ ids: string[]; note: string; version: number; archive: () => void } | null>(null);
   const [openSession, setOpenSession] = useState<number | null>(null);
+  useEffect(() => {
+    if (!pending) return;
+    return registerCopied(rid, pending.archive);
+  }, [pending, rid]);
 
   const copyText = async (text: string, msg: string) => {
     try {
@@ -106,23 +199,30 @@ export function ReviewPane({
   };
 
   const copy = async () => {
-    const snap = snapshot();
-    if (await copyText(markdown, "Review copied as markdown")) setPending({ snap, version: diskVersion });
+    const secs = sections, md = markdown;
+    if (!(await copyText(md, "Review copied as markdown"))) return;
+    setPending({
+      ids: comments.map((c) => c.id),
+      note,
+      version: diskVersion,
+      archive: () => {
+        setPending(null);
+        archiveAll(secs, md, "copy");
+      },
+    });
   };
 
   // Ask only while the copied review is still here (not cleared or already archived).
   const stillHere =
     !!pending &&
-    (pending.snap.comments.some((c) => comments.some((x) => x.id === c.id)) ||
-      (!!pending.snap.note.trim() && note.trim() === pending.snap.note.trim()));
+    (pending.ids.some((id) => comments.some((x) => x.id === id)) || (!!pending.note.trim() && note.trim() === pending.note.trim()));
   const askArchive = !!pending && diskVersion > pending.version && stillHere;
   const nextNumber = (past[0]?.n ?? 0) + 1;
 
   const archiveCopied = () => {
     if (!pending) return;
-    const r = onArchive(pending.snap, "copy");
-    setPending(null);
-    toast(`Archived as review #${r.n} · new review started`);
+    pending.archive();
+    toast(`Archived as review #${nextNumber} · new review started`);
   };
 
   const loadSessions = useCallback(async () => {
@@ -134,45 +234,20 @@ export function ReviewPane({
     }
   }, [worktree, toast]);
 
-  // A request shared by a folder of repos: offer this repo's review to the others.
-  const latest = useRef({ empty, snapshot, onArchive });
-  latest.current = { empty, snapshot, onArchive };
-  const shared = !!request?.group;
-  const section = (md: string) => `## ${repoName}\n\n${md.trimEnd()}`;
-  useEffect(() => {
-    if (!request?.group) return;
-    return contribute(request.reply, tabId, {
-      repo: repoName,
-      section: () => (latest.current.empty ? null : section(latest.current.snapshot().markdown)),
-      sent: () => {
-        const l = latest.current;
-        if (!l.empty) l.onArchive(l.snapshot(), "session", "agent (wart review)");
-      },
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [request?.reply, request?.group, tabId, repoName]);
-
   /** Answer a `wart review` request: the waiting agent prints this and continues. */
-  const reply = async (text: string, archive: boolean) => {
+  const reply = async (verdict?: string) => {
     if (!request) return;
     setBusy(true);
     try {
-      const snap = snapshot();
-      // A folder of repos: include what was written in the other repos too.
-      const rest = shared && text !== DISMISSED ? others(request.reply, tabId) : [];
-      if (rest.length) {
-        const parts = [...(archive ? [section(text)] : []), ...rest.map((o) => o.section)];
-        text = `# Review of ${request.group!.name} (${parts.length} of ${request.group!.repos} repositories with feedback)\n\n${parts.join("\n\n")}`;
-      }
+      const secs = sections, md = markdown;
+      const text = verdict ?? (empty ? APPROVED : md.trimEnd());
       await api.writeReviewReply(request.reply, text);
-      for (const o of rest) o.sent();
-      onRequestDone();
+      onRequestDone(request.reply);
       setPending(null);
-      if (archive) {
-        const r = onArchive(snap, "session", "agent (wart review)");
-        toast(`Review sent to the agent · archived as review #${r.n}${rest.length ? ` · with ${rest.length} more repo${rest.length === 1 ? "" : "s"}` : ""}`);
-      } else if (rest.length) toast(`Review of ${rest.length} repo${rest.length === 1 ? "" : "s"} sent to the agent`);
-      else toast(text === APPROVED ? "Approved: the agent continues" : "Review request dismissed");
+      if (text === md.trimEnd()) {
+        const r = archiveAll(secs, md, "session", "agent (wart review)");
+        toast(`Review sent to the agent${r ? ` · archived as review #${r.n}` : ""}${alsoRepos(secs)}`);
+      } else toast(text === APPROVED ? "Approved: the agent continues" : "Review request dismissed");
     } catch (e) {
       toast(errorMessage(e), true);
     } finally {
@@ -184,17 +259,41 @@ export function ReviewPane({
     setPickOpen(false);
     setBusy(true);
     try {
-      const snap = snapshot();
-      await api.injectText(s.id, markdown.trimEnd(), submit);
-      const r = onArchive(snap, "session", s.label);
+      const secs = sections, md = markdown;
+      await api.injectText(s.id, md.trimEnd(), submit);
       setPending(null);
-      toast(`Sent to ${s.label} · archived as review #${r.n}`);
+      const r = archiveAll(secs, md, "session", s.label);
+      toast(`Sent to ${s.label}${r ? ` · archived as review #${r.n}` : ""}${alsoRepos(secs)}`);
     } catch (e) {
       toast(errorMessage(e), true);
     } finally {
       setBusy(false);
     }
   };
+
+  const peekStyle = useAnchored(() => sendRow.current, previewOpen && !pickOpen && !empty, "right", true, 8);
+  const commentItem = (c: ReviewComment, repo: string | null, remove: (id: string) => void, jump: (c: ReviewComment) => void) => (
+    <div key={`${repo ?? ""}:${c.id}`} className={`citem${repo && repo !== repoName ? " other" : ""}`} onClick={() => jump(c)}>
+      <span className="loc">
+        {repo && <span className="repotag">{repo}</span>}
+        {c.symbol ? `${c.symbol} · ` : ""}
+        {c.file}
+        {c.line > 0 ? `:${c.line}` : " · whole file"}
+      </span>
+      <button
+        className="rm"
+        aria-label="Remove comment"
+        onClick={(e) => {
+          e.stopPropagation();
+          remove(c.id);
+        }}
+      >
+        ×
+      </button>
+      <span className="txt">{c.body}</span>
+    </div>
+  );
+  const total = comments.length + others.reduce((n, o) => n + o.comments.length, 0);
 
   return (
     <section className="pane fl review" aria-label="Review">
@@ -205,7 +304,7 @@ export function ReviewPane({
             <button
               className="linkbtn"
               onClick={onClear}
-              title={`Remove ${comments.length} comment${comments.length === 1 ? "" : "s"} and the notes`}
+              title={`Remove ${comments.length} comment${comments.length === 1 ? "" : "s"} of ${repoName} and the notes`}
             >
               clear {comments.length}
             </button>
@@ -235,38 +334,38 @@ export function ReviewPane({
                 For all {request.group.repos} repos in {request.group.name}: sending from any of them includes the comments of every repo.
               </p>
             )}
+            {!ownRequest && <p className="msg">Requested from another repo on this branch: sending from here answers it, with every repo's comments.</p>}
             <div className="row">
-              <button className="linkbtn" disabled={busy} onClick={() => void reply(APPROVED, false)} title="Tell the agent there is nothing to change">
+              <button className="linkbtn" disabled={busy} onClick={() => void reply(APPROVED)} title="Tell the agent there is nothing to change">
                 approve, no changes
               </button>
-              <button className="linkbtn" disabled={busy} onClick={() => void reply(DISMISSED, false)} title="Release the agent without a review">
+              <button className="linkbtn" disabled={busy} onClick={() => void reply(DISMISSED)} title="Release the agent without a review">
                 dismiss
               </button>
             </div>
           </div>
         )}
-        {comments.length > 0 && !preview && (
+        {total > 0 && !preview && (
           <div className="clist">
-            {comments.map((c) => (
-              <div key={c.id} className="citem" onClick={() => onJump(c)}>
-                <span className="loc">
-                  {c.symbol ? `${c.symbol} · ` : ""}
-                  {c.file}
-                  {c.line > 0 ? `:${c.line}` : " · whole file"}
-                </span>
-                <button
-                  className="rm"
-                  aria-label="Remove comment"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRemove(c.id);
-                  }}
-                >
-                  ×
-                </button>
-                <span className="txt">{c.body}</span>
+            {shared && (
+              <div className="cscope">
+                {total} comment{total === 1 ? "" : "s"} in {parts.length} repo{parts.length === 1 ? "" : "s"} · all are sent together
               </div>
-            ))}
+            )}
+            {comments.map((c) => commentItem(c, shared ? repoName : null, onRemove, onJump))}
+            {others.map((o) => [
+              ...o.comments.map((c) => commentItem(c, o.repo, o.remove, o.jump)),
+              ...(o.note.trim()
+                ? [
+                    <div key={`${o.tabId}:note`} className="citem other" onClick={o.focus}>
+                      <span className="loc">
+                        <span className="repotag">{o.repo}</span>notes
+                      </span>
+                      <span className="txt">{o.note.trim()}</span>
+                    </div>,
+                  ]
+                : []),
+            ])}
           </div>
         )}
         <div className="mdwrap">
@@ -314,26 +413,39 @@ export function ReviewPane({
           </label>
         </div>
         <div
+          ref={sendRow}
           className="row sendrow"
           onMouseEnter={() => showPreview(true)}
           onMouseLeave={() => showPreview(false)}
           onFocus={() => showPreview(true)}
           onBlur={() => showPreview(false)}
         >
-          {previewOpen && !pickOpen && !empty && (
-            <div className="promptpeek" role="tooltip" aria-label="Prompt preview">
-              <div className="cap">
-                Prompt preview <span className="faint">· {markdown.length.toLocaleString()} chars</span>
-              </div>
-              <pre>{markdown.trimEnd()}</pre>
-            </div>
-          )}
+          {previewOpen &&
+            !pickOpen &&
+            !empty &&
+            peekStyle &&
+            createPortal(
+              <div
+                className="promptpeek"
+                role="tooltip"
+                aria-label="Prompt preview"
+                style={peekStyle}
+                onMouseEnter={() => showPreview(true)}
+                onMouseLeave={() => showPreview(false)}
+              >
+                <div className="cap">
+                  Prompt preview <span className="faint">· {markdown.length.toLocaleString()} chars</span>
+                </div>
+                <pre>{markdown.trimEnd()}</pre>
+              </div>,
+              document.body,
+            )}
           <button className="btn" onClick={copy} disabled={empty}>
             <Copy size={14} /> Copy
           </button>
           {request ? (
-            <button className="btn pri" style={{ flex: 1 }} disabled={(empty && !shared) || busy} onClick={() => void reply(empty ? APPROVED : markdown.trimEnd(), !empty)}>
-              <Send size={14} /> Send to agent
+            <button className="btn pri" style={{ flex: 1 }} disabled={busy} onClick={() => void reply()}>
+              <Send size={14} /> {empty ? "Approve" : "Send to agent"}
             </button>
           ) : (
             <div style={{ position: "relative", flex: 1 }}>
@@ -376,12 +488,18 @@ export function ReviewPane({
           {past.map((r) => {
             const open = openSession === r.n;
             const count = r.comments.length;
+            const answered = r.comments.filter((c) => r.answers?.[c.id]).length;
             return (
               <div key={r.n} className={`rh${open ? " open" : ""}`}>
                 <button className="rh-row" onClick={() => setOpenSession(open ? null : r.n)} aria-expanded={open}>
                   <b>#{r.n}</b>
                   <span>{formatWhen(r.at)}</span>
                   <span className="grow" />
+                  {answered > 0 && (
+                    <span className={`ansn${answered === count ? " all" : ""}`} title={`The agent answered ${answered} of ${count}`}>
+                      {answered}/{count} answered
+                    </span>
+                  )}
                   <span className="faint" title={`${count} comment${count === 1 ? "" : "s"}`}>
                     {count} · {r.via === "session" ? "sent" : "copied"}
                   </span>
@@ -391,7 +509,33 @@ export function ReviewPane({
                     <div className="m">
                       {r.target}
                       {r.sentTo ? ` · sent to ${r.sentTo}` : " · copied & pasted"}
+                      {r.id ? ` · id ${r.id}` : ""}
                     </div>
+                    {(r.answers || r.reply) && (
+                      <div className="rh-answers">
+                        {r.reply && (
+                          <div className="rh-ans">
+                            <span className="st answered">agent</span>
+                            <span className="txt">{r.reply}</span>
+                          </div>
+                        )}
+                        {r.comments.map((c) => {
+                          const a = r.answers?.[c.id];
+                          return (
+                            <div key={c.id} className="rh-ans" onClick={() => onJump(c)}>
+                              <span className={`st ${a?.status ?? "open"}`}>{a ? a.status : "no answer"}</span>
+                              <span className="loc">
+                                {c.num != null ? `${c.num}. ` : ""}
+                                {c.file}
+                                {c.line > 0 ? `:${c.line}` : ""}
+                              </span>
+                              <span className="was">{c.body}</span>
+                              {a?.text && <span className="txt">{a.text}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                     <pre>{r.markdown.trimEnd()}</pre>
                     <button className="linkbtn" onClick={() => void copyText(r.markdown, `Review #${r.n} copied`)}>
                       copy again

@@ -320,13 +320,13 @@ footer a { color: var(--muted); }
       </div>
       <div class="card" data-n="3">
         <h3>The agent addresses it</h3>
-        <p>It receives your review as markdown with file and line references, works through every comment and asks for the next round. Each round is archived in CodeWart.</p>
+        <p>It receives your review as markdown with file and line references, works through every comment and answers each one with <code>wart answer</code>: you see “solved” or its reply right under your comment. Then it asks for the next round.</p>
       </div>
     </div>
     <div class="two">
       <div class="card">
         <h3>Claude Code <span class="tag2">skill</span></h3>
-        <p>The <code>codewart-review</code> skill teaches Claude when to ask for your review, how to keep waiting past its 10-minute command limit, and how to address every comment. Install it with:</p>
+        <p>The <code>codewart-review</code> skill teaches Claude when to ask for your review, how to keep waiting past its 10-minute command limit, and how to address and answer every comment. Install it with:</p>
         <div class="code"><pre>mkdir -p ~/.claude/skills/codewart-review
 curl -fsSL -o ~/.claude/skills/codewart-review/SKILL.md \
   https://raw.githubusercontent.com/ivostrugar/CodeWart/main/skills/codewart-review/SKILL.md</pre><button class="copy" type="button">Copy</button></div>
@@ -342,7 +342,8 @@ curl -fsSL -o ~/.claude/skills/codewart-review/SKILL.md \
         <p>Add this to the repo's <code>AGENTS.md</code> (or <code>CLAUDE.md</code>, <code>GEMINI.md</code>, <code>CONVENTIONS.md</code>):</p>
         <div class="code"><pre class="wrap-lines">## Code review
 When you finish a task, run `wart review -m "&lt;what changed, what to check&gt;"` and wait for my review
-(re-run it if it exits 3). Address every comment it prints, then ask for the next review.
+(re-run it if it exits 3). Address every comment it prints, answer each one with
+`wart answer &lt;review id&gt;` (one line per comment: `1. solved: …` / `2. answered: …`), then ask for the next review.
 If it prints APPROVED, you're done. Run `wart agent` for details.</pre><button class="copy" type="button">Copy</button></div>
         <p>The agent learns the rest from <code>wart agent</code>, which prints the <a href="llms.txt">agent guide</a>: commands, exit codes and the review format.</p>
         <p><b>Tip:</b> one worktree per agent task, opened with <code>wart .</code>, lets you review one agent while the others keep working. Run <code>wart review</code> from a folder of worktrees to review one feature across several repos at once.</p>

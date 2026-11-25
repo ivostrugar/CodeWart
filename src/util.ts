@@ -85,41 +85,65 @@ export function newId(): string {
 /** A comment on a file as a whole (made from the file header), not on lines. */
 export const isFileComment = (c: ReviewComment) => c.line === 0;
 
-/** Compile the review batch into markdown an agent can act on. */
+/** Comments in the order a review lists (and numbers) them: by file, then line. */
+export function orderComments(comments: ReviewComment[]): ReviewComment[] {
+  const byFile = new Map<string, ReviewComment[]>();
+  for (const c of comments) {
+    const list = byFile.get(c.file) ?? [];
+    list.push(c);
+    byFile.set(c.file, list);
+  }
+  return [...byFile.values()].flatMap((list) => [...list].sort((a, b) => a.line - b.line));
+}
+
+/** Compile the review batch into markdown an agent can act on. Comments are numbered from `start`. */
 export function reviewMarkdown(opts: {
   comments: ReviewComment[];
   note: string;
   target: string;
   includeCode: boolean;
+  start?: number;
 }): string {
   const out: string[] = [];
   out.push(`Review feedback on ${opts.target}:`);
   if (opts.note.trim()) out.push("", opts.note.trim());
-  const byFile = new Map<string, ReviewComment[]>();
-  for (const c of opts.comments) {
-    const list = byFile.get(c.file) ?? [];
-    list.push(c);
-    byFile.set(c.file, list);
-  }
-  let n = 1;
-  for (const [file, list] of byFile) {
-    list.sort((a, b) => a.line - b.line);
-    for (const c of list) {
-      const range = c.endLine && c.endLine !== c.line ? `${c.line}-${c.endLine}` : `${c.line}`;
-      const where = c.side === "old" ? `${file}:${range} (removed line)` : `${file}:${range}`;
-      const title = isFileComment(c)
-        ? `\`${file}\` (whole file${c.side === "old" ? ", deleted" : ""})`
-        : c.symbol
-          ? `\`${c.symbol}\` in \`${where}\``
-          : `\`${where}\``;
-      out.push("", `${n}. ${title}`);
-      if (opts.includeCode && c.code.trim()) {
-        const lang = languageOf(file) ?? "";
-        out.push("   ```" + lang, ...c.code.split("\n").map((l) => "   " + l), "   ```");
-      }
-      out.push(...c.body.trim().split("\n").map((l) => "   " + l));
-      n++;
+  let n = opts.start ?? 1;
+  for (const c of orderComments(opts.comments)) {
+    const file = c.file;
+    const range = c.endLine && c.endLine !== c.line ? `${c.line}-${c.endLine}` : `${c.line}`;
+    const where = c.side === "old" ? `${file}:${range} (removed line)` : `${file}:${range}`;
+    const title = isFileComment(c)
+      ? `\`${file}\` (whole file${c.side === "old" ? ", deleted" : ""})`
+      : c.symbol
+        ? `\`${c.symbol}\` in \`${where}\``
+        : `\`${where}\``;
+    out.push("", `${n}. ${title}`);
+    if (opts.includeCode && c.code.trim()) {
+      const lang = languageOf(file) ?? "";
+      out.push("   ```" + lang, ...c.code.split("\n").map((l) => "   " + l), "   ```");
     }
+    out.push(...c.body.trim().split("\n").map((l) => "   " + l));
+    n++;
   }
   return out.join("\n") + "\n";
+}
+
+/** The comments with the numbers `reviewMarkdown` gives them. */
+export function numbered(comments: ReviewComment[], start = 1): ReviewComment[] {
+  return orderComments(comments).map((c, i) => ({ ...c, num: start + i }));
+}
+
+/** Short id for a review, quoted back by `wart answer <id>`. */
+export function newReviewId(): string {
+  return "r" + Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+}
+
+/** Last lines of every review: how the agent answers each comment. */
+export function answerFooter(id: string, count: number): string {
+  const what = count ? "every numbered comment" : "the notes";
+  return [
+    "---",
+    `Review id: ${id}. When you have addressed this review, answer ${what} by piping one line per comment into \`wart answer ${id}\`,`,
+    "e.g. `1. solved: <what you changed>` or `2. answered: <your reply, if you didn't change code>` (`0. answered: …` for the notes).",
+  ].join("\n") + "\n";
 }

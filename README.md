@@ -103,6 +103,12 @@ On the other machine, install the app, open it once and click **Install `wart`**
 
 **Linux:** the app needs WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`), which the `.deb` declares.
 
+### Auto-update
+
+The app checks GitHub for a newer release a few seconds after it starts and every 6 hours. When one is out, an **Update to vX** button appears in the top bar: it downloads the new version, checks its signature, installs it and restarts CodeWart. Supported for the macOS app, the Windows installers and the Linux AppImage. Apps installed with `make install` check as well; `make dev` doesn't.
+
+Updates are signed with a private key that only the release workflow holds (`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets). Its public half is `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`. Keep a backup of the private key: without it, no installed app will accept another update. Local builds without the key skip the update bundles (`src-tauri/tauri.unsigned.conf.json`).
+
 Run `make` to see every command.
 
 ## Layout

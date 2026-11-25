@@ -6,7 +6,9 @@ import { api, errorMessage } from "./api";
 import { Logo } from "./components/Icons";
 import { ProjectTabs, type TabInfo, type ThemePref } from "./components/ProjectTabs";
 import { Workspace } from "./components/Workspace";
-import type { CliStatus, Editor, Filters, GraphScope, Peer, PendingReview, Project, PullRequest, ReviewRequest, View } from "./types";
+import type { CliStatus, Editor, Filters, GraphScope, Peer, PendingReview, Project, PullRequest, ReviewAnswer, ReviewRequest, View } from "./types";
+import { applyAnswers } from "./reviewAnswers";
+import { useUpdater } from "./updater";
 import { isMac, tildify } from "./util";
 
 /** One tab per repo + worktree, so a repo can be open on several worktrees at once. */
@@ -105,6 +107,8 @@ export default function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), err ? 6000 : 2600);
   }, []);
 
+  const { update, installUpdate } = useUpdater(toast);
+
   // ---- `wart` called from a branch: switch to it and make it stand out ------
   const [called, setCalled] = useState<{ ids: string[]; n: number } | null>(null);
   const calledFrom = useCallback((ids: string[]) => {
@@ -197,6 +201,11 @@ export default function App() {
     (async () => {
       api.editorInfo().then(setEditor).catch(() => {});
       api.cliStatus().then(setCli).catch(() => {});
+      // An update replaced the app: bring an installed `wart` / Claude skill up to date.
+      api
+        .refreshInstalls()
+        .then((files) => files.length && toast(`Updated ${files.map((f) => f.split(/[\\/]/).slice(-2).join("/")).join(", ")} for this version`))
+        .catch(() => {});
       const saved = load<SavedTab[]>(STORE.tabs, []);
       const savedActive = load<string | null>(STORE.active, null);
       for (const s of saved) await openRepo(s.path, { activate: false, worktree: s.worktree, quiet: true });
@@ -211,7 +220,7 @@ export default function App() {
       });
       setBooted(true);
     })();
-  }, [openRepo, openPath]);
+  }, [openRepo, openPath, toast]);
 
   useEffect(() => {
     const un = listen<string>("open-path", (e) => void openPath(e.payload, { cli: true }));
@@ -266,11 +275,7 @@ export default function App() {
   }, []);
   /** A request was answered (or dropped): clear it on every tab sharing it. */
   const reviewDone = useCallback(
-    (id: string) =>
-      setReviews((m) => {
-        const reply = m[id]?.reply;
-        return Object.fromEntries(Object.entries(m).filter(([k, v]) => k !== id && v.reply !== reply));
-      }),
+    (reply: string) => setReviews((m) => Object.fromEntries(Object.entries(m).filter(([, v]) => v.reply !== reply))),
     [],
   );
   // Drop requests whose agent stopped waiting (cancelled, or never came back after --timeout).
@@ -284,13 +289,48 @@ export default function App() {
         seen.add(r.reply);
         void api.reviewWaiting(r.reply).then((alive) => {
           if (alive || reviewsRef.current[id]?.reply !== r.reply) return;
-          reviewDone(id);
+          reviewDone(r.reply);
           toast("The agent stopped waiting for the review");
         });
       }
     }, 5000);
     return () => window.clearInterval(t);
   }, [reviews, reviewDone, toast]);
+
+  // ---- the agent's answers to review comments (`wart answer`) ------------------
+  const onAnswer = useCallback(
+    (a: ReviewAnswer) => {
+      const r = applyAnswers(a.review, a.text);
+      if (!r) toast(`Got answers for review ${a.review}, but no sent review has that id`, true);
+      else {
+        const rounds = [...new Set(r.rounds)];
+        const which = rounds.length === 1 ? `review #${rounds[0]}` : `review ${a.review} (${rounds.length} repos)`;
+        toast(r.answered ? `The agent answered ${r.answered} comment${r.answered === 1 ? "" : "s"} of ${which}` : `The agent replied to ${which}`);
+      }
+    },
+    [toast],
+  );
+  useEffect(() => {
+    if (!booted) return;
+    api.launchAnswers().then((list) => list.forEach(onAnswer)).catch(() => {});
+    const un = listen<ReviewAnswer>("review-answer", (e) => onAnswer(e.payload));
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [booted, onAnswer]);
+
+  // ---- previous tab, for Back across repos -------------------------------------
+  const visited = useRef<string[]>([]);
+  useEffect(() => {
+    if (!activeId) return;
+    visited.current = [...visited.current.filter((x) => x !== activeId), activeId].slice(-30);
+  }, [activeId]);
+  /** Back to the previous tab: forget the tab we leave, so Back keeps going back. */
+  const backTo = useCallback((id: string) => {
+    const v = visited.current;
+    visited.current = v.slice(0, -1);
+    setActiveId(id);
+  }, []);
 
   // Stable callbacks: Workspace is memoised, so inline lambdas would make every
   // open (hidden) project re-render on each tab switch.
@@ -444,6 +484,16 @@ export default function App() {
   }, [infos]);
 
   const active = infos.find((t) => t.id === activeId) ?? null;
+  // Where Back goes from the active tab when it has no history of its own.
+  const prevTab = useMemo(() => {
+    const v = visited.current;
+    for (let i = v.length - 1; i >= 0; i--) {
+      const t = infos.find((x) => x.id === v[i]);
+      if (t && t.id !== activeId) return { id: t.id, name: t.project.name };
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, infos]);
   useEffect(() => {
     document.title = active ? `${active.project.name} · ${active.group.label} — CodeWart` : "CodeWart";
   }, [active]);
@@ -464,6 +514,8 @@ export default function App() {
         onTheme={setTheme}
         cli={cli}
         onInstallCli={installCli}
+        update={update}
+        onUpdate={installUpdate}
       />
       {infos.map((t) => (
         <Workspace
@@ -485,6 +537,9 @@ export default function App() {
           groupName={t.group.label}
           tabId={t.id}
           reviewRequest={reviews[t.id]}
+          reviewScope={reviews[t.id]?.group ? `r:${reviews[t.id].reply}` : `g:${t.group.key}`}
+          backTo={t.id === activeId ? prevTab : null}
+          onBackTo={backTo}
           onReviewDone={reviewDone}
           onJumpToPeer={jumpToPeer}
           toast={toast}

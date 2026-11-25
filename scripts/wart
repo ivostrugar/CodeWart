@@ -9,6 +9,10 @@
 #                     PATH may be a folder of repos: one review covers all of them.
 #                     Exit 0: review received · 3: --timeout passed, still waiting
 #                     (run it again to keep waiting) · 1: error.
+#   wart answer REVIEW_ID < answers
+#                     send your answers to a review's numbered comments back to
+#                     CodeWart, one per comment: "1. solved: …" / "2. answered: …".
+#                     REVIEW_ID is on the review's last line.
 #   wart agent        guide for coding agents (what CodeWart is for, how to use it)
 #
 # If CodeWart is already running, projects open as new tabs there.
@@ -16,7 +20,7 @@
 set -e
 
 case "$1" in
-  -h|--help|-V|--version|review|agent) ;;
+  -h|--help|-V|--version|review|answer|agent) ;;
   *) [ $# -eq 0 ] && set -- "$PWD" ;;
 esac
 
@@ -103,6 +107,38 @@ if [ "$1" = "review" ]; then
   done
   cat "$reply"
   rm -f "$reply"
+  exit 0
+fi
+
+# ---- wart answer: answers to a review's comments, back to CodeWart ----------
+if [ "$1" = "answer" ]; then
+  id="$2"
+  case "$id" in
+    ''|*[!A-Za-z0-9]*)
+      echo "wart answer: give the review id from the review's last line, e.g. wart answer r7k2m9 < answers.md" >&2
+      exit 1 ;;
+  esac
+  rdir="${TMPDIR:-/tmp}"
+  rdir="${rdir%/}/codewart-reviews"
+  mkdir -p "$rdir"
+  file="$rdir/answer-$id-$$.md"
+  cat > "$file.tmp"
+  if ! grep -q '[^[:space:]]' "$file.tmp"; then
+    rm -f "$file.tmp"
+    echo "wart answer: no answers on stdin (one line per comment: \"1. solved: …\")" >&2
+    exit 1
+  fi
+  mv "$file.tmp" "$file"
+  nohup "$BIN" "--review-answer=$file" >/dev/null 2>&1 &
+  # CodeWart deletes the file when it has the answers.
+  i=0
+  while [ -f "$file" ] && [ $i -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
+  if [ -f "$file" ]; then
+    rm -f "$file"
+    echo "wart answer: CodeWart did not pick up the answers" >&2
+    exit 1
+  fi
+  echo "Answers sent to CodeWart (review $id)."
   exit 0
 fi
 

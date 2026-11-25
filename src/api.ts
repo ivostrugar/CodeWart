@@ -11,6 +11,7 @@ import type {
   History,
   Project,
   PullRequest,
+  ReviewAnswer,
   ReviewRequest,
   Selection,
 } from "./types";
@@ -18,6 +19,9 @@ import type {
 export const api = {
   launchPaths: () => invoke<string[]>("launch_paths"),
   launchReview: () => invoke<ReviewRequest | null>("launch_review"),
+  launchAnswers: () => invoke<ReviewAnswer[]>("launch_answers"),
+  /** Rewrite `wart` / the Claude skill if an earlier version installed them; returns what changed. */
+  refreshInstalls: () => invoke<string[]>("refresh_installs"),
   reviewWaiting: (reply: string) => invoke<boolean>("review_waiting", { reply }),
   writeReviewReply: (reply: string, text: string) => invoke<void>("write_review_reply", { reply, text }),
   /** Bounce the Dock icon and notify, unless CodeWart is already in front. */

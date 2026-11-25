@@ -9,8 +9,9 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { highlightLine } from "../highlight";
-import type { CommitBadge, DiffLine, ReviewComment } from "../types";
+import type { CommitBadge, DiffLine, Ghost, ReviewComment } from "../types";
 import { languageOf, newId } from "../util";
+import { Check, Comment } from "./Icons";
 
 /** Expand controls on a hunk header: unchanged lines hidden above it. */
 export interface ExpandInfo {
@@ -41,6 +42,8 @@ interface Props {
   rows: Row[];
   /** Review comments for this file. */
   comments: ReviewComment[];
+  /** Comments from earlier review rounds on this file, shown as small markers. */
+  ghosts?: Ghost[];
   onAddComment: (c: ReviewComment) => void;
   onRemoveComment: (id: string) => void;
   onUpdateComment: (id: string, body: string) => void;
@@ -75,7 +78,7 @@ export function submitOnEnter(e: ReactKeyboardEvent<HTMLTextAreaElement>, submit
   }
 }
 
-export const CodeLines = memo(function CodeLines({ path, rows, comments, onAddComment, onRemoveComment, onUpdateComment, flash, sendLabel, onExpand, commits, onCommit }: Props) {
+export const CodeLines = memo(function CodeLines({ path, rows, comments, ghosts, onAddComment, onRemoveComment, onUpdateComment, flash, sendLabel, onExpand, commits, onCommit }: Props) {
   const lang = languageOf(path);
   const [draft, setDraft] = useState<Draft | null>(null);
   /** Id of a saved comment being edited. */
@@ -105,6 +108,41 @@ export const CodeLines = memo(function CodeLines({ path, rows, comments, onAddCo
     }
     return m;
   }, [comments]);
+  // Ghosts sit on the line they were made on: found by the code they quoted
+  // (nearest match, since lines move), else by line number.
+  const ghostRows = useMemo(() => {
+    const m = new Map<number, Ghost[]>();
+    for (const g of ghosts ?? []) {
+      const c = g.comment;
+      const first = c.code.split("\n").map((l) => l.trim()).find(Boolean);
+      let best = -1;
+      if (first) {
+        let dist = Infinity;
+        rows.forEach((r, i) => {
+          if (r.kind === "hunk" || r.text.trim() !== first) return;
+          const { side, n } = sideOf(r);
+          const d = Math.abs(n - c.line) + (side === c.side ? 0 : 0.5);
+          if (d < dist) {
+            dist = d;
+            best = i;
+          }
+        });
+      }
+      if (best < 0) best = rowIndexOf.get(key(c.side, c.line)) ?? -1;
+      if (best < 0) continue;
+      m.set(best, [...(m.get(best) ?? []), g]);
+    }
+    return m;
+  }, [ghosts, rows, rowIndexOf]);
+  const [openGhosts, setOpenGhosts] = useState<Set<number>>(() => new Set());
+  const toggleGhost = (i: number) =>
+    setOpenGhosts((s) => {
+      const n = new Set(s);
+      if (n.has(i)) n.delete(i);
+      else n.add(i);
+      return n;
+    });
+
   /** Rows covered by a saved comment: every row from its first to its last line. */
   const commentedRows = useMemo(() => {
     const s = new Set<number>();
@@ -250,7 +288,9 @@ export const CodeLines = memo(function CodeLines({ path, rows, comments, onAddCo
               </span>
               <span className="s">{r.kind === "add" ? "+" : r.kind === "del" ? "−" : ""}</span>
               <code dangerouslySetInnerHTML={{ __html: highlightLine(r.text, lang) || " " }} />
+              {ghostRows.has(i) && <GhostMark ghosts={ghostRows.get(i)!} open={openGhosts.has(i)} onToggle={() => toggleGhost(i)} />}
             </div>
+            {openGhosts.has(i) && ghostRows.has(i) && <GhostCards ghosts={ghostRows.get(i)!} onClose={() => toggleGhost(i)} />}
             {here?.map((c) =>
               editing === c.id ? (
                 <Composer
@@ -327,6 +367,75 @@ export const CodeLines = memo(function CodeLines({ path, rows, comments, onAddCo
     </div>
   );
 });
+
+/** Overall state of the ghosts on a line: any without an answer, else solved / answered. */
+function ghostState(gs: Ghost[]): "open" | "solved" | "answered" {
+  if (gs.some((g) => !g.answer)) return "open";
+  return gs.every((g) => g.answer?.status === "solved") ? "solved" : "answered";
+}
+
+const STATE_LABEL = { open: "sent, no answer yet", solved: "solved", answered: "answered" };
+
+/** Small floating marker for comments from earlier review rounds. */
+export function GhostMark({ ghosts, open, onToggle }: { ghosts: Ghost[]; open: boolean; onToggle: () => void }) {
+  const st = ghostState(ghosts);
+  const rounds = [...new Set(ghosts.map((g) => g.round))].map((n) => `#${n}`).join(", ");
+  return (
+    <button
+      className={`ghostmark ${st}${open ? " on" : ""}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+      aria-expanded={open}
+      aria-label={`${ghosts.length} earlier comment${ghosts.length === 1 ? "" : "s"} (review ${rounds}): ${STATE_LABEL[st]}`}
+      title={`Review ${rounds}: ${STATE_LABEL[st]}. Click to ${open ? "hide" : "show"}`}
+    >
+      {st === "solved" ? <Check size={11} /> : <Comment size={11} />}
+      {ghosts.length > 1 && <span>{ghosts.length}</span>}
+    </button>
+  );
+}
+
+/** Earlier comments with the agent's answers below them. */
+export function GhostCards({ ghosts, onClose }: { ghosts: Ghost[]; onClose: () => void }) {
+  return (
+    <div className="inline">
+      {ghosts.map((g) => {
+        const c = g.comment;
+        const where = c.line === 0 ? "whole file" : c.endLine && c.endLine !== c.line ? `lines ${c.line}–${c.endLine}` : `line ${c.line}`;
+        return (
+          <div key={`${g.round}:${c.id}`} className={`ccard ghostcard ${g.answer?.status ?? "open"}`}>
+            <div className="who">
+              <b>You</b>
+              <span className="m">
+                review #{g.round}
+                {c.num != null ? ` · comment ${c.num}` : ""} · {where}
+              </span>
+              <span className="grow" />
+              <button className="linkbtn" onClick={onClose}>
+                hide
+              </button>
+            </div>
+            <p className="was">{c.body}</p>
+            {g.answer ? (
+              <div className="answer">
+                <div className="who">
+                  <span className={`st ${g.answer.status}`}>{g.answer.status}</span>
+                  <b>Agent</b>
+                </div>
+                {g.answer.text && <p>{g.answer.text}</p>}
+              </div>
+            ) : (
+              <div className="m noanswer">Sent to the agent · no answer yet</div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 /** Names the commit a run of changed lines came from, with quick filters. */
 function CommitChip({ b, onCommit }: { b: CommitBadge; onCommit: NonNullable<Props["onCommit"]> }) {

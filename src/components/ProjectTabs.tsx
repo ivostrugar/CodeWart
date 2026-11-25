@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { CliStatus, Project, PullRequest } from "../types";
+import type { UpdateState } from "../updater";
 import { relativeTime, tildify } from "../util";
-import { Branch, Close, Monitor, Moon, Sun, Plus, Terminal, WorktreeIcon } from "./Icons";
+import { Branch, Close, Download, Monitor, Moon, Sun, Plus, Terminal, WorktreeIcon } from "./Icons";
 
 export type ThemePref = "system" | "dark" | "light";
 
@@ -34,6 +35,9 @@ interface Props {
   onTheme: (t: ThemePref) => void;
   cli: CliStatus | null;
   onInstallCli: () => void;
+  /** A newer release is available (or installing). */
+  update?: UpdateState | null;
+  onUpdate?: () => void;
 }
 
 const NEXT: Record<ThemePref, ThemePref> = { system: "dark", dark: "light", light: "system" };
@@ -184,6 +188,17 @@ export function ProjectTabs(p: Props) {
           <Plus />
         </button>
       </nav>
+      {p.update && (
+        <button
+          className="clibtn upd"
+          onClick={p.onUpdate}
+          disabled={p.update.progress != null}
+          data-tip={`Install CodeWart ${p.update.version} and restart`}
+        >
+          <Download size={14} />
+          {p.update.progress == null ? `Update to v${p.update.version}` : `Updating… ${p.update.progress}%`}
+        </button>
+      )}
       {p.cli && !p.cli.installed && (
         <button className="clibtn" onClick={p.onInstallCli} data-tip={`Install the "wart" command (${tildify(p.cli.path)})`}>
           <Terminal size={14} /> Install <code>wart</code>
